@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>打牌记账 LeanCloud 版</title>
+    <script src="https://cdn.jsdelivr.net/npm/leancloud-realtime@5.0.0-rc.7/dist/realtime-browser.min.js"></script>
+    <style>
+        :root { --green: #07c160; --red: #ee0a24; --gray: #969799; }
+        body { font-family: -apple-system, sans-serif; background: #f7f8fa; margin: 0; padding: 15px; }
+        .card { background: white; border-radius: 12px; padding: 15px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        h3 { margin-top: 0; font-size: 16px; color: #323233; }
+        
+        /* 玩家列表 */
+        .player-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+        .player-item { text-align: center; padding: 10px 5px; border: 1px solid #ebedf0; border-radius: 8px; }
+        .player-item.is-me { border-color: var(--green); background: #f0fff5; }
+        .avatar { font-size: 24px; }
+        .nickname { font-size: 12px; color: #646566; margin: 4px 0; }
+        .score { font-weight: bold; font-size: 16px; }
+        
+        /* 流水 */
+        .log-item { display: flex; justify-content: space-between; font-size: 13px; padding: 8px 0; border-bottom: 1px solid #fafafa; }
+        .log-amount { font-weight: bold; }
+        .plus { color: var(--green); }
+        .minus { color: var(--red); }
+        .time { color: var(--gray); font-size: 11px; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h3>房间状态: <span id="status">连接中...</span></h3>
+    <div class="player-list" id="playerContainer"></div>
+</div>
+
+<div class="card">
+    <h3>账目流水 (点击头像记账)</h3>
+    <div id="logContainer"></div>
+</div>
+
+<script>
+    // --- 1. 配置信息 (填入你的 LeanCloud 凭证) ---
+    const CONFIG = {
+        appId: 'AdlxgSsdrDHWPHP3fYr8jKlC-MdYXbMMI',
+        appKey: 'DTYB3105pTXtUfJcFEuSNaPC',
+        serverURL: 'https://adlxgssd.api.lncldglobal.com' 
+    };
+
+    // --- 2. 初始化变量 ---
+    const { Realtime, TextMessage } = AV;
+    let client, conversation;
+    let scores = {}; // 内存中计算分数
+    let myNickname = '玩家_' + Math.floor(Math.random() * 1000); // 随机分配昵称
+
+    // --- 3. 核心逻辑 ---
+
+    async function init() {
+        const realtime = new Realtime({
+            appId: CONFIG.appId,
+            appKey: CONFIG.appKey,
+            serverURLs: CONFIG.serverURL
+        });
+
+        try {
+            // 登录
+            client = await realtime.createIMClient(myNickname);
+            document.getElementById('status').innerText = '已在线 (' + myNickname + ')';
+
+            // 加入/创建固定房间 (MVP阶段使用固定ID测试)
+            conversation = await client.createConversation({
+                name: '打牌记账房间',
+                unique: true, // 确保同一个名字只创建一个对话
+            });
+
+            // 获取历史记录并计算初始分数
+            const iter = conversation.createMessagesIterator({ limit: 50 });
+            const { value: messages } = await iter.next();
+            messages.forEach(processMsg);
+            
+            // 监听新账单
+            client.on('message', (message) => {
+                processMsg(message);
+            });
+
+            renderUI();
+        } catch (err) {
+            console.error(err);
+            alert('初始化失败，请检查配置和网络');
+        }
+    }
+
+    // 处理每一笔账单消息
+    function processMsg(msg) {
+        const attr = msg.attributes;
+        if (attr && attr.type === 'BILL') {
+            const { from, to, amount } = attr;
+            scores[from] = (scores[from] || 0) - amount;
+            scores[to] = (scores[to] || 0) + amount;
+            
+            // 添加到流水显示
+            const logHTML = `
+                <div class="log-item">
+                    <span>${from} 输给 ${to}</span>
+                    <span class="log-amount minus">-${amount}</span>
+                </div>
+            `;
+            document.getElementById('logContainer').insertAdjacentHTML('afterbegin', logHTML);
+        }
+        renderUI();
+    }
+
+    // 记账：发送自定义属性消息
+    async function sendBill(toNickname) {
+        if (toNickname === myNickname) return alert('不能给自己转账！');
+        const amount = prompt(`输给 ${toNickname} 多少分？`);
+        if (!amount || isNaN(amount)) return;
+
+        const message = new TextMessage(`[记账] ${myNickname} -> ${toNickname} : ${amount}`);
+        message.setAttributes({
+            type: 'BILL',
+            from: myNickname,
+            to: toNickname,
+            amount: parseInt(amount)
+        });
+
+        await conversation.send(message);
+        // 发送成功后，本地会自动通过监听 message 事件来更新UI
+    }
+
+    // 渲染界面
+    function renderUI() {
+        const container = document.getElementById('playerContainer');
+        // 简单确保所有出现在账单里的人都在列表中
+        const allPlayers = new Set([myNickname, ...Object.keys(scores)]);
+        
+        container.innerHTML = Array.from(allPlayers).map(name => `
+            <div class="player-item ${name === myNickname ? 'is-me' : ''}" onclick="sendBill('${name}')">
+                <div class="avatar">👤</div>
+                <div class="nickname">${name}</div>
+                <div class="score">${scores[name] || 0}</div>
+            </div>
+        `).join('');
+    }
+
+    init();
+</script>
+</body>
+</html>
